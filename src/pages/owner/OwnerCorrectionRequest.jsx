@@ -2,37 +2,37 @@ import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import EmptyState from '../../components/common/EmptyState.jsx'
 import StatusBadge from '../../components/common/StatusBadge.jsx'
-import { mockCurrentOwnerId } from '../../mock/workflow.js'
 
 const fields = [
-  ['horseName', 'Tên ngựa'], ['breed', 'Giống'], ['dateOfBirth', 'Ngày sinh'], ['coatColor', 'Màu lông'], ['gender', 'Giới tính'], ['pedigree', 'Dòng dõi'],
+  ['name', 'Tên ngựa'], ['breed', 'Giống'], ['dateOfBirth', 'Ngày sinh'], ['coatColor', 'Màu lông'], ['sex', 'Giới tính'],
 ]
 const requestStatusLabels = { Pending: 'Chờ xử lý', Approved: 'Đã chấp nhận', Rejected: 'Bị từ chối' }
 
-function OwnerCorrectionRequest({ horses, requests = [], onSubmitRequest }) {
+function OwnerCorrectionRequest({ horses, requests = [], onSubmitRequest, currentUser, horseOverride }) {
   const { horseId } = useParams()
-  const horse = horses.find((item) => item.horseId === Number(horseId) && item.ownerId === mockCurrentOwnerId)
+  const currentOwnerId = currentUser?.id || ''
+  const horse = horseOverride || horses.find((item) => String(item.id) === String(horseId) && String(item.ownerUserId) === String(currentOwnerId))
   const [field, setField] = useState('')
   const [requestedValue, setRequestedValue] = useState('')
   const [reason, setReason] = useState('')
   const [evidenceFiles, setEvidenceFiles] = useState([])
   const [submitted, setSubmitted] = useState(false)
   const currentValue = field && horse ? horse[field] ?? 'Chưa có thông tin' : ''
-  const horseRequests = useMemo(() => requests.filter((request) => request.horseId === Number(horseId)), [requests, horseId])
+  const horseRequests = useMemo(() => requests.filter((request) => String(request.horseId) === String(horseId)), [requests, horseId])
 
   if (!horse) return <main className="page-content"><section className="panel"><h1>Không tìm thấy ngựa</h1><Link to="/owner/horses">Quay lại danh sách ngựa</Link></section></main>
 
   function handleSubmit(event) {
     event.preventDefault()
-    onSubmitRequest({ ownerId: mockCurrentOwnerId, horseId: horse.horseId, field, requestedValue, reason, evidenceFiles, createdAt: new Date().toISOString() })
+    onSubmitRequest({ ownerId: currentOwnerId, horseId: horse.id, field, requestedValue, reason, evidenceFiles, createdAt: new Date().toISOString() })
     setSubmitted(true)
   }
 
   return (
     <main className="page-content">
-      <div className="breadcrumb"><Link to={`/owner/horses/${horse.horseId}`}>Hồ sơ và sức khỏe</Link><span aria-hidden="true">/</span><span>Yêu cầu hiệu chỉnh lý lịch</span></div>
+      <div className="breadcrumb"><Link to={`/owner/horses/${horse.id}`}>Hồ sơ và sức khỏe</Link><span aria-hidden="true">/</span><span>Yêu cầu hiệu chỉnh lý lịch</span></div>
       <header className="page-heading"><div><p className="eyebrow">CHỦ SỞ HỮU NGỰA · HIỆU CHỈNH LÝ LỊCH</p><h1>Yêu cầu hiệu chỉnh lý lịch</h1><p>Gửi thông tin cần sửa và bằng chứng để câu lạc bộ xem xét.</p></div></header>
-      <section className="horse-context-card"><div><h2>{horse.horseName}</h2><p>Mã ngựa #{horse.horseId} · {horse.breed}</p></div><StatusBadge status={horse.registrationStatus} type="registration" /></section>
+      <section className="horse-context-card"><div><h2>{horse.name}</h2><p>Mã ngựa #{horse.code || horse.id} · {horse.breed}</p></div><StatusBadge status={horse.profileStatus} type="registration" /></section>
       <section className="panel form-panel">
         {submitted && <p className="success-message" role="status">Yêu cầu đã được ghi nhận trong danh sách bên dưới nhưng chưa được chuyển đến câu lạc bộ.</p>}
         <form onSubmit={handleSubmit}>
@@ -42,7 +42,7 @@ function OwnerCorrectionRequest({ horses, requests = [], onSubmitRequest }) {
           <label className="form-field"><span>Lý do</span><textarea required rows="3" value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} /></label>
           <label className="form-field"><span>Bằng chứng đính kèm</span><input type="file" accept=".pdf,.jpg,.jpeg,.png" multiple onChange={(event) => setEvidenceFiles(Array.from(event.target.files || [], (file) => file.name))} /><small>Chọn tài liệu PDF hoặc hình ảnh liên quan.</small></label>
           {evidenceFiles.length > 0 && <ul className="attachment-list" aria-label="Tệp đã chọn">{evidenceFiles.map((fileName) => <li key={fileName}>{fileName}</li>)}</ul>}
-          <div className="form-actions"><button className="button" type="submit">Gửi yêu cầu hiệu chỉnh</button><Link className="button button-secondary" to={`/owner/horses/${horse.horseId}`}>Hủy</Link></div>
+          <div className="form-actions"><button className="button" type="submit">Gửi yêu cầu hiệu chỉnh</button><Link className="button button-secondary" to={`/owner/horses/${horse.id}`}>Hủy</Link></div>
         </form>
       </section>
       <section className="panel request-history">

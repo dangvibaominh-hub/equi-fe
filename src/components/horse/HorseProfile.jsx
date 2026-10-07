@@ -31,10 +31,10 @@ function HorseProfile({ horse, owner, documents, healthContent }) {
   return (
     <div className="horse-profile">
       <header className="profile-header panel">
-        <div><span className="profile-id">Mã ngựa #{horse.horseId}</span><h1>{horse.horseName || 'Chưa có tên'}</h1><p>{[horse.breed, formatHorseGender(horse.gender)].filter(Boolean).join(' · ')}</p></div>
+        <div><span className="profile-id">Mã ngựa #{horse.id}</span><h1>{horse.name || 'Chưa có tên'}</h1><p>{[horse.breed, formatHorseGender(horse.sex)].filter(Boolean).join(' · ')}</p></div>
         <div className="profile-statuses">
-          <div><span>Trạng thái hồ sơ</span><StatusBadge status={horse.registrationStatus} type="registration" /></div>
-          <div><span>Sức khỏe</span><StatusBadge status={horse.currentHealthStatus} type="health" /></div>
+          <div><span>Trạng thái hồ sơ</span><StatusBadge status={horse.profileStatus} type="registration" /></div>
+          <div><span>Sức khỏe</span><StatusBadge status={horse.healthStatus} type="health" /></div>
         </div>
       </header>
       <div className="profile-tabs" role="tablist" aria-label="Các mục hồ sơ ngựa">
@@ -44,7 +44,7 @@ function HorseProfile({ horse, owner, documents, healthContent }) {
       <section id="horse-profile-panel" className="profile-tab-panel" role="tabpanel" aria-labelledby="horse-profile-tab" hidden={activeTab !== 'profile'}>
         <HorseBasicInfo horse={horse} />
         <HorsePedigree horse={horse} />
-        <HorseOwnerInfo owner={owner} ownerId={horse.ownerId} />
+        <HorseOwnerInfo owner={owner} ownerId={horse.ownerUserId} />
         <HorseDocuments documents={documents} />
       </section>
       <section id="horse-health-panel" className="profile-tab-panel health-tab-panel" role="tabpanel" aria-labelledby="horse-health-tab" hidden={activeTab !== 'health'}>
