@@ -1,30 +1,36 @@
-import { useEffect, useMemo, useState } from 'react'
-import { BrowserRouter, Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ApiError } from './api/apiClient'
-import { completeHorseIntake as completeHorseIntakeApi, createHorse as createHorseApi, finalizeExamination as finalizeExaminationApi, getHorseById, getHorses, isHorseAssignedToVet, normalizeHorse, normalizeUser, saveExaminationDraft as saveExaminationDraftApi, updateHorse as updateHorseApi } from './api/horseApi'
-import { createUser as createUserApi, getUsers } from './api/userApi'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { BrowserRouter, Link, NavLink, Navigate, Route, Routes, useParams } from 'react-router-dom'
+import { clearSession, getAccessToken } from './api/apiClient'
+import {
+  archiveHorse, completeHorseIntake, getAvailableStalls, getHorseById, getHorseDocuments, getHorses,
+  getMedicalRecords, getPendingInitialExams, getProfileChangeRequests, getRegistrationHistory, rejectHorse,
+  saveExaminationDraft, signMedicalRecord, submitHorse, updateHorse, verifyHorse,
+} from './api/horseApi'
+import { getCurrentUser, getUsers, login } from './api/userApi'
 import HorseList from './pages/manager/HorseList.jsx'
 import CompleteIntake from './pages/manager/CompleteIntake.jsx'
+import ProfileChangeRequests from './pages/manager/ProfileChangeRequests.jsx'
 import OwnerHorses from './pages/owner/OwnerHorses.jsx'
+import OwnerHorseForm from './pages/owner/OwnerHorseForm.jsx'
 import OwnerCorrectionRequest from './pages/owner/OwnerCorrectionRequest.jsx'
 import HorsesNeedingExam from './pages/vet/HorsesNeedingExam.jsx'
 import VetExaminationForm from './pages/vet/VetExaminationForm'
-import PostExamStatus from './pages/vet/PostExamStatus.jsx'
 import HorseProfile from './components/horse/HorseProfile.jsx'
+import { registrationGroupLabel } from './components/horse/registrationGroups.js'
 import StatusBadge from './components/common/StatusBadge.jsx'
 import './App.css'
 
-const demoRoleLabels = {
+const roleLabels = {
   manager: 'QUẢN LÝ CÂU LẠC BỘ',
   owner: 'CHỦ SỞ HỮU NGỰA',
   vet: 'BÁC SĨ THÚ Y',
 }
 
-const uiRoleFromUser = (role) => {
-  if (role === 'CLUB_MANAGER') return 'manager'
-  if (role === 'OWNER') return 'owner'
-  if (role === 'VET') return 'vet'
-  return 'manager'
+function userRole(user) {
+  if (user?.role === 'CLUB_MANAGER') return 'manager'
+  if (user?.role === 'OWNER') return 'owner'
+  if (user?.role === 'VET') return 'vet'
+  return ''
 }
 
 function NavIcon({ kind }) {
@@ -34,303 +40,449 @@ function NavIcon({ kind }) {
   return <svg {...common}><path d="M4 5h16M4 10h16M4 15h10M4 20h10" /><circle cx="19" cy="17.5" r="2.5" /></svg>
 }
 
-function ProfileRoute({ horses, owners, currentUser, loadingUser, loadError, onRetryUsers }) {
-  const { horseId } = useParams()
-  const [searchParams] = useSearchParams()
-  const role = searchParams.get('role') === 'vet' ? 'vet' : 'manager'
-  if (role === 'vet') {
-    return <VetHorseRoute currentUser={currentUser} loadingUser={loadingUser} loadError={loadError} onRetryUsers={onRetryUsers} owners={owners} />
+function LoginScreen({ onLogin, error, busy }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [formError, setFormError] = useState('')
+
+  async function submit(event) {
+    event.preventDefault()
+    setFormError('')
+    try {
+      await onLogin(email.trim(), password)
+    } catch (loginError) {
+      setFormError(loginError instanceof Error ? loginError.message : 'Không thể đăng nhập.')
+    }
   }
-  const horse = horses.find((item) => String(item.id) === String(horseId))
-  return <HorseProfilePage horse={horse} role={role} exam={null} owners={owners} />
+
+  return (
+    <main className="page-content narrow-content">
+      <section className="panel form-panel">
+        <p className="eyebrow">EQUITRACK · ĐĂNG NHẬP</p>
+        <h1>Đăng nhập</h1>
+        <p>Đăng nhập bằng tài khoản của bạn để truy cập hồ sơ theo đúng quyền được cấp.</p>
+        {(formError || error) && <p className="error-message" role="alert">{formError || error}</p>}
+        <form onSubmit={submit}>
+          <label className="form-field"><span>Email</span><input type="email" autoComplete="username" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+          <label className="form-field"><span>Mật khẩu</span><input type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+          <button className="button" type="submit" disabled={busy}>{busy ? 'Đang đăng nhập...' : 'Đăng nhập'}</button>
+        </form>
+      </section>
+    </main>
+  )
 }
 
-function HorseProfilePage({ horse, role, exam, owners }) {
-  const owner = owners.find((item) => String(item.ownerId) === String(horse?.ownerUserId ?? horse?.ownerId ?? ''))
+function HorseProfilePage({ horse, role, registrationHistory = [], onRefresh, onSubmitRegistration, registrationBusy, registrationError, registrationMessage, canRegister }) {
   const backTo = role === 'owner' ? '/owner/horses' : role === 'vet' ? '/vet/horses-needing-exam' : '/manager/horses'
-  const intakeStatus = horse?.intake?.examinationStatus || 'PENDING'
+  const rejection = [...registrationHistory].reverse().find((item) => item.status === 'Rejected' && item.managerNote)?.managerNote
   const healthContent = horse ? <div className="health-summary-grid">
     <div className="info-item"><span>Tình trạng sức khỏe hiện tại</span><StatusBadge status={horse.healthStatus} type="health" /></div>
-    <div className="info-item"><span>Trạng thái khám</span><StatusBadge status={intakeStatus} label={intakeStatus === 'COMPLETED' ? 'Đã khám' : 'Chờ khám'} type="exam" /></div>
+    <div className="info-item"><span>Khám đầu vào</span><StatusBadge status={horse.initialExamSigned ? 'COMPLETED' : 'PENDING'} type="exam" /></div>
+    {horse.healthAssessment && <>
+      <div className="info-item"><span>HealthStatus</span><strong>{horse.healthAssessment.healthStatus || 'Chưa có kết luận'}</strong></div>
+      <div className="info-item"><span>TrainingEligibility</span><strong>{horse.healthAssessment.trainingEligibility || 'Chưa có kết luận'}</strong></div>
+      {horse.healthAssessment.conclusion && <div className="info-item"><span>Kết luận</span><strong>{horse.healthAssessment.conclusion}</strong></div>}
+      {horse.healthAssessment.examDate && <div className="info-item"><span>Ngày khám</span><strong>{horse.healthAssessment.examDate}</strong></div>}
+    </>}
     <div className="info-item"><span>Cập nhật gần nhất</span><strong>{horse.updatedAt || 'Chưa có thông tin'}</strong></div>
-    {role === 'vet' && <section className="profile-section">
-      <div className="section-title"><h2>Tiền sử khám</h2></div>
-      {horse.examinations?.length ? horse.examinations.map((examination, index) => (
-        <article className="panel" key={examination.id || `${examination.examinedAt || examination.examDate || 'exam'}-${index}`}>
-          <strong>{examination.examinedAt || examination.examDate || 'Chưa có ngày khám'}</strong>
-          {examination.weightKg != null && <p>Cân nặng: {examination.weightKg} kg</p>}
-          {examination.heightCm != null && <p>Chiều cao: {examination.heightCm} cm</p>}
-          {examination.symptoms && <p>Triệu chứng: {examination.symptoms}</p>}
-          {examination.diagnosis && <p>Chẩn đoán: {examination.diagnosis}</p>}
-          {(examination.treatmentPlan || examination.treatment) && <p>Xử trí: {examination.treatmentPlan || examination.treatment}</p>}
-          {examination.conclusion && <p>Kết luận: {examination.conclusion}</p>}
-        </article>
-      )) : <p className="profile-copy">Chưa có dữ liệu khám.</p>}
-    </section>}
   </div> : undefined
-  const postExamPath = role === 'vet' ? `/vet/horses/${horse?.id}/examination` : `/${role}/horses/${horse?.id}/post-exam`
 
   return (
     <main className="page-content">
       <div className="horse-actions">
         <Link className="breadcrumb-back-button" to={backTo}>← Quay lại danh sách ngựa</Link>
         {horse && <div className="profile-actions">
-          {role === 'manager' && <Link className="button" to={`/manager/horses/${horse.id}/intake`}>Hoàn tất tiếp nhận</Link>}
-          {role === 'owner' && <Link className="button button-secondary" to={`/owner/horses/${horse.id}/correction-request`}>Yêu cầu hiệu chỉnh lý lịch</Link>}
-          {role === 'vet' && <Link className="button" to={postExamPath}>Nhập kết quả khám</Link>}
-          {role !== 'vet' && <Link className="button button-secondary" to={postExamPath}>Trạng thái hồ sơ</Link>}
+          {role === 'manager' && <Link className="button" to={`/manager/horses/${horse.id}/intake`}>Xử lý Flow 1</Link>}
+          {role === 'owner' && canRegister && (horse.profileStatus === 'DRAFT' || horse.profileStatus === 'REJECTED') && <Link className="button button-secondary" to={`/owner/horses/${horse.id}/edit`}>Sửa hồ sơ</Link>}
+          {role === 'owner' && canRegister && (horse.profileStatus === 'DRAFT' || horse.profileStatus === 'REJECTED') && <button className="button" type="button" onClick={() => void onSubmitRegistration(horse.id)} disabled={registrationBusy}>{registrationBusy ? 'Đang gửi...' : 'Gửi đăng ký'}</button>}
+          {role === 'owner' && horse.profileStatus === 'APPROVED' && <Link className="button" to={`/owner/horses/${horse.id}/correction-request`}>Yêu cầu sửa hồ sơ</Link>}
+          {role === 'vet' && horse.profileStatus === 'PENDING_EXAM' && <Link className="button" to={`/vet/horses/${horse.id}/examination`}>Khám đầu vào</Link>}
         </div>}
       </div>
-      {exam && <section className="horse-context-card exam-context-card"><div><h2>Yêu cầu khám {exam.examId}</h2><p>Ngày phân công: {exam.assignedAt}</p></div><StatusBadge status={exam.status} label={exam.status === 'Waiting' ? 'Chờ khám' : 'Đã khám'} /></section>}
-      <HorseProfile horse={horse} owner={owner} healthContent={healthContent} />
+      {role === 'owner' && registrationError && <p className="error-message" role="alert">{registrationError}</p>}
+      {role === 'owner' && registrationMessage && <p className="success-message" role="status">{registrationMessage}</p>}
+      {role === 'owner' && horse.profileStatus === 'REJECTED' && (rejection || horse.rejectionReason) && <section className="rejection-reason" aria-label="Lý do từ chối"><strong>Lý do từ chối</strong><p>{rejection || horse.rejectionReason}</p></section>}
+      <HorseProfile horse={horse} owner={horse?.ownerName ? { fullName: horse.ownerName } : undefined} documents={horse?.documents} healthContent={healthContent} registrationLabel={role === 'manager' ? registrationGroupLabel(horse) : undefined} />
+      {registrationHistory.length > 0 && <section className="panel profile-section"><h2>Lịch sử đăng ký</h2><div className="request-list">{registrationHistory.map((item) => <article className="request-item" key={item.id}><strong>Yêu cầu #{item.id} · {item.status}</strong><p>Ngày gửi: {item.requestDate || '—'}{item.reviewedAt ? ` · Ngày xử lý: ${item.reviewedAt}` : ''}</p>{item.managerNote && <p>Ghi chú Manager: {item.managerNote}</p>}</article>)}</div></section>}
+      {horse && <button className="button button-secondary" type="button" onClick={() => void onRefresh(horse.id)}>Tải lại hồ sơ</button>}
     </main>
   )
 }
 
-function VetHorseRoute({ currentUser, loadingUser, loadError, onRetryUsers, owners, onSaveDraft, onFinalize, examination = false }) {
+function HorseProfileRoute({ currentUser, horses, onRefresh, onHorseUpdated }) {
   const { horseId } = useParams()
-  const [horse, setHorse] = useState(null)
-  const [loadingHorse, setLoadingHorse] = useState(true)
-  const [notFound, setNotFound] = useState(false)
-  const [forbidden, setForbidden] = useState(false)
+  const role = userRole(currentUser)
+  const cachedHorse = horses.find((horse) => String(horse.id) === String(horseId))
+  const [horse, setHorse] = useState(cachedHorse || null)
+  const [registrationHistory, setRegistrationHistory] = useState([])
+  const [loadedHorseId, setLoadedHorseId] = useState('')
   const [error, setError] = useState('')
-  const [retryCount, setRetryCount] = useState(0)
+  const [registrationBusy, setRegistrationBusy] = useState(false)
+  const [registrationError, setRegistrationError] = useState('')
+  const [registrationMessage, setRegistrationMessage] = useState('')
 
-  useEffect(() => {
-    let isCurrent = true
-
-    async function loadHorse() {
-      setHorse(null)
-      setNotFound(false)
-      setForbidden(false)
+  const load = useCallback(async () => {
+    try {
+      const [result, documents, history] = await Promise.all([
+        getHorseById(String(horseId)),
+        getHorseDocuments(String(horseId)),
+        getRegistrationHistory(String(horseId)),
+      ])
       setError('')
-
-      if (loadingUser) return
-      if (!currentUser && loadError) {
-        setLoadingHorse(false)
-        setError(loadError)
-        return
-      }
-      if (currentUser?.role !== 'VET') {
-        setLoadingHorse(false)
-        setForbidden(true)
-        return
-      }
-
-      setLoadingHorse(true)
-      try {
-        const result = normalizeHorse(await getHorseById(String(horseId)))
-        if (!isCurrent) return
-        setHorse(result)
-        setForbidden(!isHorseAssignedToVet(result, currentUser))
-        setLoadingHorse(false)
-      } catch (loadError) {
-        if (!isCurrent) return
-        setLoadingHorse(false)
-        if (loadError instanceof ApiError && loadError.status === 404) {
-          setNotFound(true)
-        } else if (loadError instanceof ApiError && (loadError.status === 401 || loadError.status === 403)) {
-          setForbidden(true)
-        } else {
-          setError(loadError instanceof Error ? loadError.message : 'Không thể tải hồ sơ ngựa.')
-        }
-      }
+      setHorse({ ...result, documents })
+      setRegistrationHistory(history)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Không thể tải hồ sơ ngựa.')
+    } finally {
+      setLoadedHorseId(String(horseId))
     }
+  }, [horseId])
 
-    void loadHorse()
-    return () => {
-      isCurrent = false
+  useEffect(() => { void load() }, [load])
+  const loading = loadedHorseId !== String(horseId)
+  if (loading) return <main className="page-content"><section className="panel" role="status">Đang tải hồ sơ ngựa...</section></main>
+  if (error) return <main className="page-content"><section className="panel" role="alert"><h1>Không thể tải hồ sơ</h1><p>{error}</p><button className="button" type="button" onClick={() => { setError(''); setLoadedHorseId(''); void load() }}>Thử lại</button></section></main>
+  async function sendRegistration(id) {
+    setRegistrationBusy(true)
+    setRegistrationError('')
+    setRegistrationMessage('')
+    try {
+      const saved = await submitHorse(id)
+      const updated = { ...saved, documents: horse?.documents || [] }
+      setHorse(updated)
+      onHorseUpdated(updated)
+      setRegistrationMessage('Đã gửi hồ sơ đến CLB')
+    } catch (submitError) {
+      setRegistrationError(submitError instanceof Error ? submitError.message : 'Không thể gửi hồ sơ đăng ký.')
+    } finally {
+      setRegistrationBusy(false)
     }
-  }, [horseId, currentUser, loadingUser, loadError, retryCount])
-
-  if (loadingUser || loadingHorse) {
-    return <main className="page-content"><section className="panel" role="status">Đang tải hồ sơ ngựa...</section></main>
-  }
-  if (!currentUser && loadError) {
-    return <main className="page-content"><section className="panel"><h1>Không thể tải tài khoản</h1><p>{loadError}</p><button className="button" type="button" onClick={onRetryUsers}>Thử lại</button></section></main>
-  }
-  if (error) {
-    return <main className="page-content"><section className="panel"><h1>Không thể tải hồ sơ ngựa</h1><p>{error}</p><button className="button" type="button" onClick={() => setRetryCount((count) => count + 1)}>Thử lại</button></section></main>
-  }
-  if (notFound) {
-    return <main className="page-content"><section className="panel"><h1>Không tìm thấy ngựa</h1><p>Không có hồ sơ ngựa với mã {horseId}.</p><Link className="button" to="/vet/horses-needing-exam">Quay lại danh sách</Link></section></main>
-  }
-  if (forbidden || !horse) {
-    return <main className="page-content"><section className="panel"><h1>Không có quyền truy cập</h1><p>Ngựa không thuộc câu lạc bộ hoặc không được phân công cho tài khoản Vet hiện tại.</p><Link className="button" to="/vet/horses-needing-exam">Quay lại danh sách</Link></section></main>
   }
 
-  if (examination) {
-    const owner = owners.find((item) => String(item.ownerId) === String(horse.ownerUserId))
-    return <VetExaminationForm horse={horse} currentUser={currentUser} owner={owner} onSaveDraft={onSaveDraft} onFinalize={onFinalize} onHorseSaved={setHorse} />
-  }
-
-  return <HorseProfilePage horse={horse} role="vet" exam={null} owners={owners} />
+  return <HorseProfilePage
+    horse={horse}
+    role={role}
+    registrationHistory={registrationHistory}
+    onRefresh={async (id) => { await load(); await onRefresh(id) }}
+    onSubmitRegistration={sendRegistration}
+    registrationBusy={registrationBusy}
+    registrationError={registrationError}
+    registrationMessage={registrationMessage}
+    canRegister={currentUser.permissions.includes('HORSE_REGISTER')}
+  />
 }
 
-function DemoPicker({ currentRole, currentUserId, users, onChangeRole, onChangeUser }) {
-  const labels = { manager: 'QUẢN LÝ CÂU LẠC BỘ', owner: 'CHỦ SỞ HỮU NGỰA', vet: 'BÁC SĨ THÚ Y' }
-  if (!users.length) return null
+function ManagerIntakeRoute({ horses, permissions, onUpdateHorse, onSubmitHorse, onVerifyHorse, onRejectHorse, onApproveHorse, onArchiveHorse }) {
+  const { horseId } = useParams()
+  const [horse, setHorse] = useState(null)
+  const [error, setError] = useState('')
+  const [loadedId, setLoadedId] = useState('')
+  const [stalls, setStalls] = useState([])
+  const [stallError, setStallError] = useState('')
+  const [stallReloadCount, setStallReloadCount] = useState(0)
 
+  const loadHorse = useCallback(async () => {
+    try {
+      const result = await getHorseById(String(horseId))
+      setHorse(result)
+      setError('')
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Không thể tải chi tiết hồ sơ.')
+    } finally {
+      setLoadedId(String(horseId))
+    }
+  }, [horseId])
+
+  useEffect(() => { void loadHorse() }, [loadHorse])
+  useEffect(() => {
+    let current = true
+    getAvailableStalls().then((result) => {
+      if (current) {
+        setStalls(result)
+        setStallError('')
+      }
+    }).catch((loadError) => {
+      if (current) {
+        setStalls([])
+        setStallError(loadError instanceof Error ? loadError.message : 'Không thể tải danh sách chuồng trống.')
+      }
+    })
+    return () => { current = false }
+  }, [stallReloadCount])
+  const loading = loadedId !== String(horseId)
+  if (loading) return <main className="page-content"><section className="panel" role="status">Đang tải chi tiết hồ sơ...</section></main>
+  if (error || !horse) return <main className="page-content"><section className="panel" role="alert"><h1>Không thể tải hồ sơ</h1><p>{error || 'Không tìm thấy hồ sơ ngựa.'}</p><button className="button" type="button" onClick={() => { setLoadedId(''); void loadHorse() }}>Thử lại</button></section></main>
+
+  async function applyHorseAction(action) {
+    const saved = await action()
+    setHorse(saved)
+    return saved
+  }
+
+  return <CompleteIntake
+    horses={horses}
+    horse={horse}
+    stalls={stalls}
+    stallError={stallError}
+    onRetryStalls={() => setStallReloadCount((count) => count + 1)}
+    permissions={permissions}
+    onUpdateHorse={(id, changes) => applyHorseAction(() => onUpdateHorse(id, changes))}
+    onSubmitHorse={(id) => applyHorseAction(() => onSubmitHorse(id))}
+    onVerifyHorse={(id) => applyHorseAction(() => onVerifyHorse(id))}
+    onRejectHorse={(id, reason) => applyHorseAction(() => onRejectHorse(id, reason))}
+    onApproveHorse={(id, payload) => applyHorseAction(() => onApproveHorse(id, payload))}
+    onArchiveHorse={(id, reason) => applyHorseAction(() => onArchiveHorse(id, reason))}
+  />
+}
+
+function OwnerCorrectionRoute({ horses }) {
+  const { horseId } = useParams()
+  const horse = horses.find((item) => String(item.id) === String(horseId))
+  const [requests, setRequests] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [reloadCount, setReloadCount] = useState(0)
+
+  useEffect(() => {
+    let current = true
+    getProfileChangeRequests(String(horseId)).then((result) => {
+      if (current) {
+        setRequests(result)
+        setError('')
+      }
+    }).catch((loadError) => {
+      if (current) setError(loadError instanceof Error ? loadError.message : 'Không thể tải lịch sử yêu cầu.')
+    }).finally(() => {
+      if (current) setLoading(false)
+    })
+    return () => { current = false }
+  }, [horseId, reloadCount])
+
+  if (loading) return <main className="page-content"><section className="panel" role="status">Đang tải yêu cầu sửa hồ sơ...</section></main>
+  if (error) return <main className="page-content"><section className="panel" role="alert"><h1>Không thể tải yêu cầu</h1><p>{error}</p><button className="button" type="button" onClick={() => { setLoading(true); setReloadCount((count) => count + 1) }}>Thử lại</button></section></main>
+
+  return <OwnerCorrectionRequest
+    horse={horse}
+    requests={requests}
+    onSubmitted={(saved) => setRequests((current) => [saved, ...current])}
+  />
+}
+
+function VetHorseRoute({ currentUser, initialExams, onRefresh, examination = false }) {
+  const { horseId } = useParams()
+  const [horse, setHorse] = useState(null)
+  const [records, setRecords] = useState([])
+  const [registrationHistory, setRegistrationHistory] = useState([])
+  const [loadedHorseId, setLoadedHorseId] = useState('')
+  const [error, setError] = useState('')
+
+  const load = useCallback(async (preserveExistingError = false) => {
+    try {
+      const [horseResult, recordResult, documents, history] = await Promise.all([
+        getHorseById(String(horseId)),
+        getMedicalRecords(String(horseId)),
+        getHorseDocuments(String(horseId)),
+        getRegistrationHistory(String(horseId)),
+      ])
+      setError('')
+      setHorse({ ...horseResult, documents })
+      setRecords(recordResult)
+      setRegistrationHistory(history)
+      return true
+    } catch (loadError) {
+      if (!preserveExistingError) setError(loadError instanceof Error ? loadError.message : 'Không thể tải hồ sơ khám.')
+      return false
+    } finally {
+      setLoadedHorseId(String(horseId))
+    }
+  }, [horseId])
+
+  useEffect(() => { void load() }, [load])
+
+  const loading = loadedHorseId !== String(horseId)
+  if (loading) return <main className="page-content"><section className="panel" role="status">Đang tải hồ sơ khám...</section></main>
+  if (error) return <main className="page-content"><section className="panel" role="alert"><h1>Không thể tải hồ sơ khám</h1><p>{error}</p><button className="button" type="button" onClick={() => { setError(''); setLoadedHorseId(''); void load() }}>Thử lại</button></section></main>
+  if (!horse) return null
+
+  const pendingExam = initialExams.find((item) => String(item.horse.id) === String(horse.id))
+  const requestStatus = {
+    PENDING_EXAM: 'PendingExam',
+    APPROVED: 'Approved',
+    REJECTED: 'Rejected',
+  }[horse.profileStatus]
+  const activeRequest = requestStatus
+    ? registrationHistory.find((item) => item.status === requestStatus)
+    : undefined
+  const draft = pendingExam?.draftMedicalRecordId
+    ? records.find((record) => record.id === pendingExam.draftMedicalRecordId
+      && record.registrationRequestId === pendingExam.requestId
+      && record.examType === 'Initial Exam'
+      && record.recordStatus === 'Draft')
+    : undefined
+  const signedRecord = activeRequest
+    ? records.find((record) => record.registrationRequestId === activeRequest.id
+      && record.examType === 'Initial Exam'
+      && record.recordStatus === 'Signed')
+    : undefined
+  if (examination) {
+    return <VetExaminationForm
+      horse={horse}
+      currentUser={currentUser}
+      draft={draft}
+      signedRecord={signedRecord}
+      onSaveDraft={saveExaminationDraft}
+      onSign={signMedicalRecord}
+      onAfterSign={async () => {
+        const loaded = await load(true)
+        if (!loaded) throw new Error('Phiếu đã chốt nhưng không tải lại được hồ sơ. Hãy tải lại để xác nhận dữ liệu mới nhất.')
+        await onRefresh(horse.id)
+      }}
+    />
+  }
+
+  const owner = horse.ownerName || ''
   return (
-    <div className="demo-picker" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-      <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <span style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>Vai trò</span>
-        <select value={currentRole} onChange={(event) => onChangeRole(event.target.value)}>
-          {Object.entries(labels).map(([role, label]) => <option key={role} value={role}>{label}</option>)}
-        </select>
-      </label>
-      <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <span style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>Tài khoản</span>
-        <select value={currentUserId} onChange={(event) => onChangeUser(event.target.value)}>
-          {users.filter((user) => uiRoleFromUser(user.role) === currentRole).map((user) => <option key={user.id} value={user.id}>{user.fullName}</option>)}
-        </select>
-      </label>
-    </div>
+    <main className="page-content">
+      <div className="horse-actions"><Link className="breadcrumb-back-button" to="/vet/horses-needing-exam">← Quay lại hàng đợi</Link>
+        {horse.profileStatus === 'PENDING_EXAM' && <Link className="button" to={`/vet/horses/${horse.id}/examination`}>Mở khám đầu vào</Link>}
+      </div>
+      <HorseProfilePage horse={horse} role="vet" registrationHistory={registrationHistory} onRefresh={async (id) => { await load(); await onRefresh(id) }} />
+      <section className="panel profile-section"><h2>Phiếu khám</h2>{records.length === 0 ? <p>Chưa có phiếu khám.</p> : records.map((record) => <article key={record.id}><strong>#{record.id} · {record.examType} · {record.recordStatus}</strong><p>Vet: {record.vetName || `#${record.vetId}`} · {record.examDate || 'Chưa có ngày'}</p><p>{record.conclusion}</p></article>)}</section>
+      {owner && <span className="sr-only">Chủ sở hữu: {owner}</span>}
+    </main>
   )
 }
 
 function AppContent() {
+  const [currentUser, setCurrentUser] = useState(null)
+  const [authChecking, setAuthChecking] = useState(Boolean(getAccessToken()))
+  const [authError, setAuthError] = useState('')
+  const [loggingIn, setLoggingIn] = useState(false)
   const [horses, setHorses] = useState([])
-  const [exams, setExams] = useState([])
-  const [correctionRequests, setCorrectionRequests] = useState([])
-  const [archiveRecords, setArchiveRecords] = useState([])
   const [users, setUsers] = useState([])
-  const [apiError, setApiError] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [loadRetryCount, setLoadRetryCount] = useState(0)
-  const [selectedRole, setSelectedRole] = useState(() => localStorage.getItem('equi-demo-role') || 'manager')
-  const [selectedUserId, setSelectedUserId] = useState(() => localStorage.getItem('equi-demo-user-id') || '')
-  const { pathname } = useLocation()
+  const [initialExams, setInitialExams] = useState([])
+  const [loadingData, setLoadingData] = useState(Boolean(getAccessToken()))
+  const [loadError, setLoadError] = useState('')
+  const [reloadCount, setReloadCount] = useState(0)
 
-  function retryLoadDemoData() {
-    setLoading(true)
-    setApiError('')
-    setLoadRetryCount((count) => count + 1)
+  useEffect(() => {
+    const expire = () => {
+      setCurrentUser(null)
+      setAuthError('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.')
+    }
+    window.addEventListener('equi:session-expired', expire)
+    return () => window.removeEventListener('equi:session-expired', expire)
+  }, [])
+
+  useEffect(() => {
+    if (!getAccessToken()) {
+      return
+    }
+    let current = true
+    getCurrentUser().then((user) => {
+      if (current) {
+        setCurrentUser(user)
+        setAuthError('')
+      }
+    }).catch((error) => {
+      if (current) {
+        clearSession()
+        setAuthError(error instanceof Error ? error.message : 'Không thể xác minh phiên đăng nhập.')
+      }
+    }).finally(() => {
+      if (current) setAuthChecking(false)
+    })
+    return () => { current = false }
+  }, [])
+
+  const loadData = useCallback(async () => {
+    if (!currentUser) return
+    try {
+      const [horseRows, ownerRows, examRows] = await Promise.all([
+        getHorses(),
+        currentUser.role === 'CLUB_MANAGER' ? getUsers('HORSE_OWNER') : Promise.resolve([]),
+        currentUser.role === 'VET' ? getPendingInitialExams() : Promise.resolve([]),
+      ])
+      setHorses(horseRows)
+      setUsers(ownerRows)
+      setInitialExams(examRows)
+    } catch (error) {
+      setHorses([])
+      setUsers([])
+      setInitialExams([])
+      setLoadError(error instanceof Error ? error.message : 'Không thể tải dữ liệu.')
+    } finally {
+      setLoadingData(false)
+    }
+  }, [currentUser])
+
+  useEffect(() => { void loadData() }, [loadData, reloadCount])
+
+  const retryLoad = () => {
+    setLoadingData(true)
+    setLoadError('')
+    setReloadCount((count) => count + 1)
   }
 
-  useEffect(() => {
-    let isMounted = true
-
-    const loadDemoData = async () => {
-      try {
-        const [apiUsers, apiHorses] = await Promise.all([getUsers(), getHorses()])
-        if (!isMounted) return
-
-        const normalizedUsers = apiUsers.map((user) => normalizeUser(user))
-        const normalizedHorses = apiHorses.map((horse) => normalizeHorse(horse))
-
-        setUsers(normalizedUsers)
-        setHorses(normalizedHorses)
-        setApiError('')
-        setLoading(false)
-
-        if (!localStorage.getItem('equi-demo-user-id') && normalizedUsers.length) {
-          const firstManager = normalizedUsers.find((user) => user.role === 'CLUB_MANAGER') || normalizedUsers[0]
-          setSelectedUserId(firstManager.id)
-          setSelectedRole(uiRoleFromUser(firstManager.role))
-        }
-      } catch (error) {
-        if (!isMounted) return
-        setUsers([])
-        setHorses([])
-        setApiError(error instanceof Error ? error.message : 'Không thể kết nối MockAPI.')
-        setLoading(false)
-      }
+  async function handleLogin(email, password) {
+    setLoggingIn(true)
+    setLoadingData(true)
+    setAuthError('')
+    setLoadError('')
+    try {
+      const result = await login(email, password)
+      setCurrentUser(result.user)
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Không thể đăng nhập.')
+      throw error
+    } finally {
+      setLoggingIn(false)
     }
+  }
 
-    loadDemoData()
-    return () => {
-      isMounted = false
-    }
-  }, [loadRetryCount])
-
-  const normalizedOwners = useMemo(
-    () => users.filter((user) => user.role === 'OWNER').map((user) => ({ ownerId: user.id, fullName: user.fullName, id: user.id })),
-    [users],
-  )
-  const workflowWarnings = useMemo(
-    () => horses.filter((horse) => horse.profileStatus === 'PENDING_EXAM'
-      && horse.intake?.examinationStatus === 'COMPLETED'
-      && horse.healthAssessment?.purpose === 'INTAKE'
-      && horse.examinations?.some((item) => item.status === 'FINALIZED'
-        && (item.purpose === 'INTAKE' || !item.purpose))),
-    [horses],
-  )
-  const availableUsersForRole = useMemo(() => users.filter((user) => uiRoleFromUser(user.role) === selectedRole), [users, selectedRole])
-
-  useEffect(() => {
-    localStorage.setItem('equi-demo-role', selectedRole)
-  }, [selectedRole])
-
-  useEffect(() => {
-    if (selectedUserId) localStorage.setItem('equi-demo-user-id', selectedUserId)
-  }, [selectedUserId])
-
-  const currentUser = users.find((user) => user.id === selectedUserId) || availableUsersForRole[0] || users[0] || null
-  const resolvedRole = currentUser ? uiRoleFromUser(currentUser.role) : selectedRole
-  const home = resolvedRole === 'owner' ? '/owner/horses' : resolvedRole === 'vet' ? '/vet/horses-needing-exam' : '/manager/horses'
-  const requestedProfileRole = new URLSearchParams(window.location.search).get('role')
-  const routeAllowed = pathname.startsWith('/owner') ? resolvedRole === 'owner' : pathname.startsWith('/vet') ? resolvedRole === 'vet' : pathname.startsWith('/manager') ? resolvedRole === 'manager' : pathname.startsWith('/horses/') ? (requestedProfileRole === 'vet' ? resolvedRole === 'vet' : resolvedRole === 'manager') : true
-  const date = new Intl.DateTimeFormat('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' }).formatToParts(new Date()).filter((part) => ['day', 'month', 'year'].includes(part.type)).map((part) => part.value).join(' / ')
-
-  async function updateHorse(horseId, updates) {
-    const currentHorse = horses.find((horse) => String(horse.id) === String(horseId))
-    if (!currentHorse) return null
-
-    const nextHorse = normalizeHorse({
-      ...currentHorse,
-      ...updates,
-      intake: { ...(currentHorse.intake ?? {}), ...((updates.intake ?? {}) || {}) },
-      ownershipHistory: updates.ownershipHistory ?? currentHorse.ownershipHistory,
-    })
-
-    const savedHorse = await updateHorseApi(String(horseId), nextHorse)
-    const normalizedSavedHorse = normalizeHorse(savedHorse)
-    setHorses((current) => current.map((horse) => String(horse.id) === String(horseId) ? normalizedSavedHorse : horse))
-    return normalizedSavedHorse
+  function logout() {
+    clearSession()
+    setCurrentUser(null)
+    setLoadingData(false)
+    setHorses([])
+    setUsers([])
+    setInitialExams([])
+    setAuthError('')
   }
 
   function syncHorse(savedHorse) {
-    const normalizedHorse = normalizeHorse(savedHorse)
-    setHorses((current) => current.map((horse) => String(horse.id) === normalizedHorse.id ? normalizedHorse : horse))
-    return normalizedHorse
+    setHorses((current) => current.map((horse) => String(horse.id) === String(savedHorse.id) ? savedHorse : horse))
+    setInitialExams((current) => current.filter((item) => String(item.horse.id) !== String(savedHorse.id)))
   }
 
-  async function saveExaminationDraft(horseId, vet, input) {
-    return syncHorse(await saveExaminationDraftApi(horseId, vet, input))
+  async function refreshHorse(horseId) {
+    const horse = await getHorseById(String(horseId))
+    syncHorse(horse)
+    return horse
   }
 
-  async function finalizeExamination(horseId, vet, input) {
-    return syncHorse(await finalizeExaminationApi(horseId, vet, input))
+  async function refreshVetData(horseId) {
+    const [horse, examRows] = await Promise.all([
+      getHorseById(String(horseId)),
+      getPendingInitialExams(),
+    ])
+    syncHorse(horse)
+    setInitialExams(examRows)
+    return horse
   }
 
-  async function completeIntake(horseId, managerId) {
-    return syncHorse(await completeHorseIntakeApi(horseId, managerId))
+  async function actionOnHorse(action) {
+    const saved = await action
+    syncHorse(saved)
+    return saved
   }
 
-  function updateExam(examId, updates) {
-    setExams((current) => current.map((exam) => exam.examId === examId ? { ...exam, ...updates } : exam))
-  }
+  const role = userRole(currentUser)
+  const home = role === 'owner' ? '/owner/horses' : role === 'vet' ? '/vet/horses-needing-exam' : '/manager/horses'
+  const ownerList = useMemo(() => users.map((user) => ({ ownerId: user.id, id: user.id, fullName: user.fullName })), [users])
 
-  function addCorrectionRequest(request) {
-    setCorrectionRequests((current) => [{ ...request, requestId: `CR-${Date.now()}`, status: 'Pending', rejectionReason: '' }, ...current])
-  }
-
-  function archiveHorse(horseId, reason) {
-    const horse = horses.find((item) => String(item.id) === String(horseId))
-    if (!horse || !reason.trim()) return
-
-    const archivedAt = new Date().toISOString()
-    updateHorse(horseId, { profileStatus: 'ARCHIVED', updatedAt: archivedAt })
-    setArchiveRecords((current) => {
-      if (current.some((record) => String(record.horseId) === String(horseId))) return current
-      return [{ archiveId: `AR-${Date.now()}`, horseId, reason: reason.trim(), archivedAt, archivedByRole: 'Club Manager' }, ...current]
-    })
-  }
-
-  const vetHorseCount = currentUser?.role === 'VET'
-    ? horses.filter((horse) => isHorseAssignedToVet(horse, currentUser)).length
-    : 0
+  if (authChecking) return <main className="page-content"><section className="panel" role="status">Đang xác minh phiên đăng nhập...</section></main>
+  if (!currentUser) return <LoginScreen onLogin={handleLogin} error={authError} busy={loggingIn} />
 
   return (
     <div className="app-shell">
@@ -338,229 +490,51 @@ function AppContent() {
         <Link className="brand" to={home}><span className="brand-mark">E</span><span><strong>EQUITRACK</strong><small>RACETRACK PERFORMANCE</small></span></Link>
         <p className="sidebar-label">KHÔNG GIAN LÀM VIỆC</p>
         <nav className="side-nav" aria-label="Điều hướng chính">
-          {resolvedRole === 'manager' && <><NavLink end to="/manager/horses"><NavIcon kind="manager" /><span>Danh sách ngựa</span></NavLink>{(pathname.includes('/intake') || pathname.includes('/post-exam')) && <span className="nav-context"><NavIcon kind="manager" /><span>{pathname.includes('/intake') ? 'Tiếp nhận / lưu trữ' : 'Trạng thái sau khám'}</span></span>}</>}
-          {resolvedRole === 'owner' && <><NavLink end to="/owner/horses"><NavIcon kind="owner" /><span>Ngựa của tôi</span></NavLink>{pathname.startsWith('/owner/horses/') && <span className="nav-context"><NavIcon kind="owner" /><span>{pathname.includes('correction-request') ? 'Hiệu chỉnh lý lịch' : pathname.includes('post-exam') ? 'Sức khỏe sau khám' : 'Hồ sơ và sức khỏe'}</span></span>}</>}
-          {resolvedRole === 'vet' && <><NavLink end to="/vet/horses-needing-exam"><NavIcon kind="vet" /><span>Hồ sơ khám</span>{vetHorseCount > 0 && <span className="nav-badge">{vetHorseCount}</span>}</NavLink>{pathname.startsWith('/vet/horses/') && <span className="nav-context"><NavIcon kind="vet" /><span>Hồ sơ chuyên môn</span></span>}</>}
+          {role === 'manager' && <>
+            <NavLink end to="/manager/horses"><NavIcon kind="manager" /><span>Danh sách ngựa</span></NavLink>
+            {currentUser.permissions.includes('PROFILE_EDIT_APPROVE') && <NavLink to="/manager/profile-change-requests"><NavIcon kind="manager" /><span>Yêu cầu sửa hồ sơ</span></NavLink>}
+          </>}
+          {role === 'owner' && <NavLink end to="/owner/horses"><NavIcon kind="owner" /><span>Ngựa của tôi</span></NavLink>}
+          {role === 'vet' && <NavLink end to="/vet/horses-needing-exam"><NavIcon kind="vet" /><span>Hàng đợi khám</span></NavLink>}
         </nav>
         <div className="sidebar-support"><strong>Cần hỗ trợ?</strong><span>Liên hệ quản lý câu lạc bộ</span><span className="support-link">Trung tâm hỗ trợ</span></div>
       </aside>
       <div className="app-main">
         <header className="topbar">
-          <div className="topbar-workspace"><span className="topbar-kicker">{demoRoleLabels[resolvedRole]}</span><strong>Câu lạc bộ Hoàng Gia</strong></div>
-          <div className="topbar-account">
-            <span className="topbar-date">{date}</span>
-            <DemoPicker currentRole={resolvedRole} currentUserId={currentUser?.id || ''} users={users} onChangeRole={(value) => { setSelectedRole(value); const nextUser = users.find((user) => uiRoleFromUser(user.role) === value); if (nextUser) setSelectedUserId(nextUser.id) }} onChangeUser={setSelectedUserId} />
-            <div className="topbar-user">
-              <span className="avatar" aria-hidden="true">{(currentUser?.fullName || 'E').split(' ').map((part) => part[0]).slice(0, 2).join('').toUpperCase()}</span>
-              <div className="account-name"><strong>{currentUser?.fullName || 'Demo manager'}</strong><span><i />{loading ? 'Đang tải...' : 'Đang hoạt động'}</span></div>
-            </div>
-          </div>
+          <div className="topbar-workspace"><span className="topbar-kicker">{roleLabels[role]}</span><strong>{currentUser.clubId ? `Câu lạc bộ #${currentUser.clubId}` : 'Equi'}</strong></div>
+          <div className="topbar-account"><div className="topbar-user"><span className="avatar" aria-hidden="true">{currentUser.fullName.split(' ').map((part) => part[0]).slice(0, 2).join('').toUpperCase()}</span><div className="account-name"><strong>{currentUser.fullName}</strong><span><i />{loadingData ? 'Đang tải...' : 'Đang hoạt động'}</span></div></div><button className="button button-secondary" type="button" onClick={logout}>Đăng xuất</button></div>
         </header>
-        {apiError && <div className="alert-banner" style={{ margin: '12px 24px 0', background: '#fff4f4', color: '#7a1d1d', border: '1px solid #f7c2c2', borderRadius: 8, padding: '10px 12px' }}>{apiError}</div>}
-        {workflowWarnings.length > 0 && <div className="alert-banner" role="alert" style={{ margin: '12px 24px 0', background: '#fff8e7', color: '#684b00', border: '1px solid #f0d58a', borderRadius: 8, padding: '10px 12px' }}>
-          Dữ liệu quy trình lệch ở {workflowWarnings.map((horse) => `#${horse.code || horse.id}`).join(', ')}: đã có phiếu khám đầu vào FINALIZED và tiếp nhận khám COMPLETED nhưng hồ sơ vẫn PENDING_EXAM. Không tự sửa dữ liệu; Manager cần xác minh lịch sử rồi cập nhật có kiểm soát sang PENDING_COMPLETION.
-        </div>}
-        {!routeAllowed && (
-          <main className="page-content"><section className="panel"><h1>Không có quyền truy cập</h1><p>Trang này không phù hợp với tài khoản hiện tại.</p><Link className="button" to={home}>Về trang chính</Link></section></main>
-        )}
-        {routeAllowed && <Routes>
+        {loadError && <div className="alert-banner" role="alert" style={{ margin: '12px 24px 0', background: '#fff4f4', color: '#7a1d1d', border: '1px solid #f7c2c2', borderRadius: 8, padding: '10px 12px' }}>{loadError} <button type="button" onClick={retryLoad}>Thử lại</button></div>}
+        {loadingData && <main className="page-content"><section className="panel" role="status">Đang tải dữ liệu...</section></main>}
+        {!loadingData && !loadError && <Routes>
           <Route path="/" element={<Navigate to={home} replace />} />
-          <Route path="/manager/horses" element={<HorseList horses={horses} owners={normalizedOwners} currentUser={currentUser} />} />
-          <Route path="/manager/horses/new" element={<ManagerHorseFormRoute currentUser={currentUser} users={users} horses={horses} onHorseCreated={(horse) => setHorses((current) => [normalizeHorse(horse), ...current])} onUserCreated={(user) => setUsers((current) => [normalizeUser(user), ...current])} />} />
-          <Route path="/horses/:horseId" element={<ProfileRoute horses={horses} owners={normalizedOwners} currentUser={currentUser} loadingUser={loading} loadError={apiError} onRetryUsers={retryLoadDemoData} />} />
-          <Route path="/manager/horses/:horseId/intake" element={<ManagerIntakeRoute horses={horses} users={users} currentUser={currentUser} archiveRecords={archiveRecords} onUpdateHorse={updateHorse} onCompleteIntake={completeIntake} onArchiveHorse={archiveHorse} />} />
-          <Route path="/manager/horses/:horseId/post-exam" element={<RolePostExamRoute horses={horses} exams={exams} viewerRole="manager" onUpdateHorse={updateHorse} onUpdateExam={updateExam} />} />
-          <Route path="/owner/horses" element={<OwnerHorses horses={horses} currentUser={currentUser} owners={normalizedOwners} />} />
-          <Route path="/owner/horses/:horseId" element={<OwnerProfileRoute horses={horses} currentUser={currentUser} owners={normalizedOwners} />} />
-          <Route path="/owner/horses/:horseId/correction-request" element={<OwnerCorrectionRoute horses={horses} requests={correctionRequests} onSubmitRequest={addCorrectionRequest} currentUser={currentUser} />} />
-          <Route path="/owner/horses/:horseId/post-exam" element={<OwnerPostExamRoute horses={horses} exams={exams} onUpdateHorse={updateHorse} onUpdateExam={updateExam} currentUser={currentUser} />} />
-          <Route path="/vet/horses-needing-exam" element={<HorsesNeedingExam horses={horses} currentUser={currentUser} owners={normalizedOwners} />} />
-          <Route path="/vet/horses/:horseId" element={<VetHorseRoute currentUser={currentUser} loadingUser={loading} loadError={apiError} onRetryUsers={retryLoadDemoData} owners={normalizedOwners} />} />
-          <Route path="/vet/horses/:horseId/examination" element={<VetHorseRoute currentUser={currentUser} loadingUser={loading} loadError={apiError} onRetryUsers={retryLoadDemoData} owners={normalizedOwners} onSaveDraft={saveExaminationDraft} onFinalize={finalizeExamination} examination />} />
+          <Route path="/manager/horses" element={role === 'manager' ? <HorseList owners={ownerList} /> : <Navigate to={home} replace />} />
+          <Route path="/manager/profile-change-requests" element={role === 'manager' && currentUser.permissions.includes('PROFILE_EDIT_APPROVE') ? <ProfileChangeRequests onHorseRefresh={refreshHorse} /> : <Navigate to={home} replace />} />
+          <Route path="/manager/horses/:horseId/intake" element={role === 'manager' ? <ManagerIntakeRoute
+            horses={horses}
+            permissions={currentUser.permissions}
+            onUpdateHorse={(id, changes) => actionOnHorse(updateHorse(id, changes))}
+            onSubmitHorse={(id) => actionOnHorse(submitHorse(id))}
+            onVerifyHorse={(id) => actionOnHorse(verifyHorse(id))}
+            onRejectHorse={(id, reason) => actionOnHorse(rejectHorse(id, reason))}
+            onApproveHorse={(id, payload) => actionOnHorse(completeHorseIntake(id, payload))}
+            onArchiveHorse={(id, reason) => actionOnHorse(archiveHorse(id, reason))}
+          /> : <Navigate to={home} replace />} />
+          <Route path="/owner/horses" element={role === 'owner' ? <OwnerHorses horses={horses} currentUser={currentUser} owners={[{ ownerId: currentUser.id, fullName: currentUser.fullName }]} /> : <Navigate to={home} replace />} />
+          <Route path="/owner/horses/new" element={role === 'owner' && currentUser.permissions.includes('HORSE_REGISTER') ? <OwnerHorseForm currentUser={currentUser} onSaved={(horse) => setHorses((current) => [horse, ...current.filter((item) => String(item.id) !== String(horse.id))])} /> : <Navigate to={home} replace />} />
+          <Route path="/owner/horses/:horseId/edit" element={role === 'owner' && currentUser.permissions.includes('HORSE_REGISTER') ? <OwnerHorseForm currentUser={currentUser} onSaved={syncHorse} /> : <Navigate to={home} replace />} />
+          <Route path="/vet/horses-needing-exam" element={role === 'vet' ? <HorsesNeedingExam initialExams={initialExams} onRetry={retryLoad} /> : <Navigate to={home} replace />} />
+                  <Route path="/vet/horses/:horseId" element={role === 'vet' ? <VetHorseRoute currentUser={currentUser} initialExams={initialExams} onRefresh={refreshVetData} /> : <Navigate to={home} replace />} />
+                  <Route path="/vet/horses/:horseId/examination" element={role === 'vet' ? <VetHorseRoute currentUser={currentUser} initialExams={initialExams} onRefresh={refreshVetData} examination /> : <Navigate to={home} replace />} />
+          <Route path="/owner/horses/:horseId" element={role === 'owner' ? <HorseProfileRoute currentUser={currentUser} horses={horses} onRefresh={refreshHorse} onHorseUpdated={syncHorse} /> : <Navigate to={home} replace />} />
+          <Route path="/owner/horses/:horseId/correction-request" element={role === 'owner' ? <OwnerCorrectionRoute horses={horses} /> : <Navigate to={home} replace />} />
+          <Route path="/horses/:horseId" element={<HorseProfileRoute currentUser={currentUser} horses={horses} onRefresh={refreshHorse} onHorseUpdated={syncHorse} />} />
           <Route path="*" element={<main className="page-content"><section className="panel"><h1>Không tìm thấy trang</h1><Link to={home}>Quay lại</Link></section></main>} />
         </Routes>}
-        <footer className="app-footer">EQUITRACK · Quản lý đào tạo ngựa đua</footer>
+        <footer className="app-footer">EQUITRACK · FLOW 1</footer>
       </div>
     </div>
   )
-}
-
-function ManagerHorseFormRoute({ currentUser, users, horses, onHorseCreated, onUserCreated }) {
-  const navigate = useNavigate()
-  const ownerOptions = users.filter((user) => user.role === 'OWNER' && String(user.clubId) === String(currentUser?.clubId ?? '1'))
-  const [formState, setFormState] = useState({
-    code: '', name: '', breed: '', dateOfBirth: '', sex: 'MALE', coatColor: '', registrationNumber: '', microchipNumber: '', sireId: '', damId: '', ownerUserId: ownerOptions[0]?.id || '',
-  })
-  const [ownerForm, setOwnerForm] = useState({ fullName: '', phone: '', email: '', address: '' })
-  const [showOwnerForm, setShowOwnerForm] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState('')
-  const [success, setSuccess] = useState('')
-
-  const handleChange = (field) => (event) => {
-    setFormState((current) => ({ ...current, [field]: event.target.value }))
-  }
-
-  async function handleCreateOwner(event) {
-    event.preventDefault()
-    const fullName = ownerForm.fullName.trim()
-    const email = ownerForm.email.trim()
-    if (!fullName || !email) {
-      setError('Vui lòng nhập đầy đủ họ tên và email cho chủ sở hữu mới.')
-      return
-    }
-
-    setSubmitting(true)
-    try {
-      const payload = { clubId: String(currentUser?.clubId ?? '1'), fullName, phone: ownerForm.phone.trim(), email, address: ownerForm.address.trim(), role: 'OWNER', isActive: true }
-      const created = await createUserApi(payload)
-      const normalized = normalizeUser(created)
-      onUserCreated(normalized)
-      setFormState((current) => ({ ...current, ownerUserId: normalized.id }))
-      setOwnerForm({ fullName: '', phone: '', email: '', address: '' })
-      setShowOwnerForm(false)
-      setSuccess('Đã tạo chủ sở hữu mới.')
-      setError('')
-    } catch (createError) {
-      setError(createError instanceof Error ? createError.message : 'Không thể tạo chủ sở hữu mới.')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  async function handleSubmit(event) {
-    event.preventDefault()
-    const trimmed = {
-      ...Object.fromEntries(Object.entries(formState).map(([key, value]) => [key, typeof value === 'string' ? value.trim() : value])),
-      ownerUserId: formState.ownerUserId.trim() || ownerOptions[0]?.id || '',
-    }
-    if (!trimmed.code || !trimmed.name || !trimmed.breed || !trimmed.dateOfBirth || !trimmed.ownerUserId) {
-      setError('Vui lòng nhập mã ngựa, tên, giống, ngày sinh và chủ sở hữu.')
-      return
-    }
-
-    const duplicateCode = horses.some((horse) => String(horse.clubId) === String(currentUser?.clubId ?? '1') && String(horse.code).toLowerCase() === String(trimmed.code).toLowerCase())
-    if (duplicateCode) {
-      setError('Mã ngựa đã tồn tại trong cùng câu lạc bộ.')
-      return
-    }
-
-    const createdAt = new Date().toISOString()
-    const payload = {
-      clubId: String(currentUser?.clubId ?? '1'),
-      code: trimmed.code,
-      name: trimmed.name,
-      breed: trimmed.breed,
-      dateOfBirth: trimmed.dateOfBirth,
-      sex: trimmed.sex,
-      coatColor: trimmed.coatColor,
-      registrationNumber: trimmed.registrationNumber,
-      microchipNumber: trimmed.microchipNumber,
-      sireId: trimmed.sireId || '',
-      damId: trimmed.damId || '',
-      ownerUserId: trimmed.ownerUserId,
-      profileStatus: 'DRAFT',
-      healthStatus: 'NOT_ASSESSED',
-      intake: {},
-      healthAssessment: {},
-      ownershipHistory: [{ id: `own-${createdAt.replace(/\D/g, '')}`, ownerUserId: trimmed.ownerUserId, effectiveFrom: trimmed.dateOfBirth, effectiveTo: '' }],
-      examinations: [],
-      medicalRecords: [],
-      vaccinations: [],
-      documents: [],
-      correctionRequests: [],
-      auditLogs: [{ id: `log-${createdAt.replace(/\D/g, '')}`, actorId: currentUser?.id ?? 'system', action: 'CREATE_HORSE', description: 'Tạo hồ sơ ngựa mới', createdAt }],
-      createdAt,
-      updatedAt: createdAt,
-    }
-
-    setSubmitting(true)
-    try {
-      const createdHorse = await createHorseApi(payload)
-      onHorseCreated(createdHorse)
-      setSuccess('Tạo ngựa thành công.')
-      setError('')
-      navigate(`/horses/${createdHorse.id}`)
-    } catch (createError) {
-      setError(createError instanceof Error ? createError.message : 'Không thể tạo ngựa mới.')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <main className="page-content">
-      <nav className="breadcrumb" aria-label="Đường dẫn">Quản lý <span aria-hidden="true">/</span> Thêm ngựa</nav>
-      <header className="page-heading"><div><p className="eyebrow">DANH SÁCH NGỰA</p><h1>Thêm ngựa</h1><p>Nhập thông tin cơ bản và gắn chủ sở hữu trong cùng câu lạc bộ.</p></div></header>
-      <section className="panel">
-        {error && <div className="alert-banner" style={{ marginBottom: 12, background: '#fff4f4', color: '#7a1d1d', border: '1px solid #f7c2c2', borderRadius: 8, padding: '10px 12px' }}>{error}</div>}
-        {success && <div className="alert-banner" style={{ marginBottom: 12, background: '#f1fff3', color: '#1b5e20', border: '1px solid #b7e4c1', borderRadius: 8, padding: '10px 12px' }}>{success}</div>}
-        <form onSubmit={handleSubmit} className="horse-form-grid">
-          <label className="form-field"><span>Mã ngựa</span><input value={formState.code} onChange={handleChange('code')} required /></label>
-          <label className="form-field"><span>Tên ngựa</span><input value={formState.name} onChange={handleChange('name')} required /></label>
-          <label className="form-field"><span>Giống</span><input value={formState.breed} onChange={handleChange('breed')} required /></label>
-          <label className="form-field"><span>Ngày sinh</span><input type="date" value={formState.dateOfBirth} onChange={handleChange('dateOfBirth')} required /></label>
-          <label className="form-field"><span>Giới tính</span><select value={formState.sex} onChange={handleChange('sex')}><option value="MALE">Nam</option><option value="FEMALE">Nữ</option><option value="GELDING">Gelding</option></select></label>
-          <label className="form-field"><span>Màu lông</span><input value={formState.coatColor} onChange={handleChange('coatColor')} /></label>
-          <label className="form-field"><span>Số đăng ký</span><input value={formState.registrationNumber} onChange={handleChange('registrationNumber')} /></label>
-          <label className="form-field"><span>Microchip</span><input value={formState.microchipNumber} onChange={handleChange('microchipNumber')} /></label>
-          <label className="form-field"><span>Cha</span><input value={formState.sireId} onChange={handleChange('sireId')} placeholder="ID cha" /></label>
-          <label className="form-field"><span>Mẹ</span><input value={formState.damId} onChange={handleChange('damId')} placeholder="ID mẹ" /></label>
-          <label className="form-field"><span>Chủ sở hữu</span><select value={formState.ownerUserId || ownerOptions[0]?.id || ''} onChange={handleChange('ownerUserId')}><option value="">Chọn chủ sở hữu</option>{ownerOptions.map((owner) => <option key={owner.id} value={owner.id}>{owner.fullName}</option>)}</select></label>
-          <div className="form-field form-actions-inline" style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between' }}>
-            <button type="button" className="button button-secondary" onClick={() => setShowOwnerForm((current) => !current)}>{showOwnerForm ? 'Đóng' : 'Tạo Owner mới'}</button>
-            <button type="submit" className="button" disabled={submitting}>{submitting ? 'Đang lưu...' : 'Lưu ngựa'}</button>
-          </div>
-        </form>
-        {showOwnerForm && (
-          <form onSubmit={handleCreateOwner} className="horse-form-grid" style={{ marginTop: 24 }}>
-            <label className="form-field"><span>Họ tên chủ sở hữu</span><input value={ownerForm.fullName} onChange={(event) => setOwnerForm((current) => ({ ...current, fullName: event.target.value }))} required /></label>
-            <label className="form-field"><span>Số điện thoại</span><input value={ownerForm.phone} onChange={(event) => setOwnerForm((current) => ({ ...current, phone: event.target.value }))} /></label>
-            <label className="form-field"><span>Email</span><input type="email" value={ownerForm.email} onChange={(event) => setOwnerForm((current) => ({ ...current, email: event.target.value }))} required /></label>
-            <label className="form-field"><span>Địa chỉ</span><input value={ownerForm.address} onChange={(event) => setOwnerForm((current) => ({ ...current, address: event.target.value }))} /></label>
-            <div className="form-field form-actions-inline"><button type="submit" className="button" disabled={submitting}>Lưu Owner</button></div>
-          </form>
-        )}
-      </section>
-    </main>
-  )
-}
-
-function OwnerProfileRoute({ horses, currentUser, owners }) {
-  const { horseId } = useParams()
-  const horse = horses.find((item) => String(item.id) === String(horseId) && String(item.ownerUserId) === String(currentUser?.id || ''))
-  return <HorseProfilePage horse={horse} role="owner" exam={null} owners={owners} />
-}
-
-function OwnerCorrectionRoute({ horses, requests, onSubmitRequest, currentUser }) {
-  const { horseId } = useParams()
-  const ownedHorses = horses.filter((item) => String(item.ownerUserId) === String(currentUser?.id || ''))
-  const horse = ownedHorses.find((item) => String(item.id) === String(horseId))
-  return <OwnerCorrectionRequest horses={ownedHorses} requests={requests.filter((request) => String(request.ownerId) === String(currentUser?.id || ''))} onSubmitRequest={onSubmitRequest} currentUser={currentUser} horseOverride={horse} />
-}
-
-function ManagerIntakeRoute({ horses, users, currentUser, archiveRecords, onUpdateHorse, onCompleteIntake, onArchiveHorse }) {
-  const { horseId } = useParams()
-  const horse = horses.find((item) => String(item.id) === String(horseId))
-  const archiveRecord = archiveRecords.find((record) => String(record.horseId) === String(horseId))
-  return <CompleteIntake horses={horses} horse={horse} users={users} currentUser={currentUser} archiveRecord={archiveRecord} onUpdateHorse={onUpdateHorse} onCompleteIntake={onCompleteIntake} onArchiveHorse={onArchiveHorse} />
-}
-
-function OwnerPostExamRoute({ horses, exams, currentUser, onUpdateHorse, onUpdateExam }) {
-  const { horseId } = useParams()
-  const horse = horses.find((item) => String(item.id) === String(horseId) && String(item.ownerUserId) === String(currentUser?.id || ''))
-  const exam = exams.find((item) => String(item.horseId) === String(horse?.id))
-  return <PostExamStatus horse={horse} exam={exam} viewerRole="owner" onUpdateHorse={onUpdateHorse} onUpdateExam={onUpdateExam} />
-}
-
-function RolePostExamRoute({ horses, exams, viewerRole, onUpdateHorse, onUpdateExam }) {
-  const { horseId, examId } = useParams()
-  const exam = viewerRole === 'vet'
-    ? exams.find((item) => (examId ? item.examId === examId : String(item.horseId) === String(horseId)))
-    : exams.find((item) => String(item.horseId) === String(horseId))
-  const resolvedHorseId = viewerRole === 'vet' ? exam?.horseId : horseId
-  const horse = horses.find((item) => String(item.id) === String(resolvedHorseId))
-  return <PostExamStatus horse={horse} exam={exam} viewerRole={viewerRole} onUpdateHorse={onUpdateHorse} onUpdateExam={onUpdateExam} />
 }
 
 function App() {

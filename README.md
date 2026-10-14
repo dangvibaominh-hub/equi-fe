@@ -1,12 +1,12 @@
 # equi-fe
 
-Frontend React + Vite cho dự án Equi. Vite chạy mặc định tại `http://localhost:5173` và proxy request `/api` sang Spring Boot tại `http://localhost:8080`.
+Frontend React + Vite cho dự án Equi. Vite chạy mặc định tại `http://localhost:5173` và proxy request `/api` sang Django REST backend tại `http://127.0.0.1:8000`.
 
 ## Yêu cầu
 
 - Node.js `^20.19.0` hoặc `>=22.12.0` (Node.js 24 cũng phù hợp)
 - npm đi kèm Node.js
-- Backend `equi-be` chạy tại cổng 8080
+- Backend `equi-backend` chạy tại cổng 8000
 
 ## Cài dependency và chạy bằng PowerShell
 
@@ -27,11 +27,11 @@ Repository dùng `package-lock.json`, vì vậy dùng `npm.cmd ci` để cài đ
 File `.env.example` cung cấp hai giá trị mẫu:
 
 - `VITE_API_BASE_URL=/api`: URL tập trung mà code frontend sử dụng.
-- `VITE_API_PROXY_TARGET=http://localhost:8080`: đích proxy chỉ dành cho Vite dev server.
+- `VITE_API_PROXY_TARGET=http://127.0.0.1:8000`: đích proxy chỉ dành cho Vite dev server.
 
 Chỉ biến bắt đầu bằng `VITE_` mới được Vite đưa vào frontend; tuyệt đối không đặt tài khoản MySQL, mật khẩu hoặc token bí mật ở đây. `.env.local` bị Git ignore. Các biến `DB_USERNAME` và `DB_PASSWORD` thuộc terminal chạy Spring Boot, không thuộc frontend; Spring Boot cũng không tự đọc `.env.local` của Vite.
 
-Với cấu hình dev mặc định, trình duyệt gọi cùng origin `/api` qua Vite proxy nên backend không cần mở CORS cho cổng 5173.
+Với cấu hình dev mặc định, trình duyệt gọi `/api` qua Vite proxy. Backend dùng prefix `/api/` (xác minh trong `equi-backend/config/urls.py`). Đăng nhập bằng tài khoản backend; access/refresh JWT được lưu cục bộ và gửi trong header Bearer. Không đặt token trong file môi trường Vite.
 
 ## Kiểm tra
 
@@ -49,7 +49,7 @@ npm.cmd run preview
 ## Lỗi thường gặp
 
 - `npm.ps1 cannot be loaded`: dùng `npm.cmd` như các lệnh phía trên.
-- Backend hiển thị `DOWN`: chạy `equi-be` trong terminal khác và kiểm tra cổng 8080.
+- Backend hiển thị `DOWN`: chạy `equi-backend` trong terminal khác và kiểm tra cổng 8000.
 - Backend `UP`, database `DOWN`: backend đã nhận request nhưng `SELECT 1` thất bại; kiểm tra MySQL và biến môi trường ở terminal backend.
 - Backend chạy cổng khác: đổi `VITE_API_PROXY_TARGET` trong `.env.local`, rồi khởi động lại Vite.
 - Đổi `.env.local` nhưng chưa có hiệu lực: dừng và chạy lại `npm.cmd run dev`.
