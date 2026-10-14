@@ -1,7 +1,7 @@
 export type UserRole = 'CLUB_MANAGER' | 'OWNER' | 'VET';
-export type ProfileStatus = 'DRAFT' | 'PENDING_EXAM' | 'PENDING_COMPLETION' | 'RECEIVED' | 'ARCHIVED';
-export type HealthStatus = 'NOT_ASSESSED' | 'ELIGIBLE' | 'MONITORING' | 'INJURED' | 'ISOLATION';
-export type Sex = 'MALE' | 'FEMALE' | 'GELDING';
+export type ProfileStatus = 'DRAFT' | 'SUBMITTED' | 'PENDING_EXAM' | 'APPROVED' | 'REJECTED' | 'ARCHIVED' | 'UNKNOWN';
+export type HealthStatus = 'NOT_ASSESSED' | 'ELIGIBLE' | 'MONITORING' | 'INJURED' | 'RECOVERING' | 'ISOLATION';
+export type Sex = 'MALE' | 'FEMALE' | 'GELDING' | 'UNKNOWN';
 
 export interface User {
   id: string;
@@ -12,6 +12,7 @@ export interface User {
   address: string;
   createdAt: string;
   role: UserRole;
+  permissions: string[];
   isActive: boolean;
 }
 
@@ -53,6 +54,8 @@ export interface Examination {
   movementRestrictions?: string;
   exerciseRestrictions?: string;
   followUpDate?: string;
+  trainingEligibility?: string;
+  restrictionNote?: string;
   createdAt?: string;
   createdBy?: string;
   status?: 'DRAFT' | 'FINALIZED' | string;
@@ -77,6 +80,9 @@ export interface HealthAssessment {
   treatmentPlan?: string;
   status?: HealthStatus;
   movementRestrictions?: string;
+  examDate?: string;
+  trainingEligibility?: string;
+  restrictionNote?: string;
 }
 
 export interface MedicalRecord {
@@ -142,16 +148,21 @@ export interface Horse {
   coatColor: string;
   registrationNumber: string;
   microchipNumber: string;
-  sireId?: string;
-  damId?: string;
+  sireName: string;
+  damName: string;
   ownerUserId?: string;
   profileStatus: ProfileStatus;
+  rejectionReason?: string;
   healthStatus: HealthStatus;
   archiveReason?: string;
   createdAt: string;
   updatedAt: string;
   intake?: Intake;
   healthAssessment?: HealthAssessment;
+  initialExamSigned?: boolean;
+  ownerName?: string;
+  archivedAt?: string;
+  currentStall?: { StallID: number; StallNumber: string; StartDate: string };
   ownershipHistory?: OwnershipRecord[];
   examinations?: Examination[];
   medicalRecords?: MedicalRecord[];
